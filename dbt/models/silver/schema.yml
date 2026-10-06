@@ -1,0 +1,8 @@
+version: 2
+models:
+  - name: example_model
+    description: Development smoke-test model.
+    columns:
+      - name: id
+        tests:
+          - not_null
