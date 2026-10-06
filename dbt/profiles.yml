@@ -1,0 +1,11 @@
+lakehouse:
+  target: dev
+  outputs:
+    dev:
+      type: spark_livy
+      method: livy
+      schema: silver
+      host: "{{ env_var('DBT_LIVY_HOST') }}"
+      user: "{{ env_var('DBT_LIVY_USER') }}"
+      password: "{{ env_var('DBT_LIVY_PASSWORD') }}"
+      threads: 4
