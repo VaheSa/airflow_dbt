@@ -1,0 +1,146 @@
+x-airflow-common: &airflow-common
+  build:
+    context: ./airflow
+    dockerfile: Dockerfile
+  image: ${AIRFLOW_IMAGE_NAME:-bank-airflow:3.3.0}
+  env_file: [${ENV_FILE_PATH:-.env}]
+  environment: &airflow-env
+    AIRFLOW_CONFIG: /opt/airflow/config/airflow.cfg
+    AIRFLOW__CORE__AUTH_MANAGER: airflow.providers.fab.auth_manager.fab_auth_manager.FabAuthManager
+    AIRFLOW__FAB__CONFIG_FILE: /opt/airflow/config/webserver_config.py
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres/${POSTGRES_DB}
+    AIRFLOW__CELERY__RESULT_BACKEND: db+postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres/${POSTGRES_DB}
+    AIRFLOW__CELERY__BROKER_URL: redis://:${REDIS_PASSWORD}@redis:6379/0
+    AIRFLOW__CORE__FERNET_KEY: ${FERNET_KEY}
+    AIRFLOW__API_AUTH__JWT_SECRET: ${AIRFLOW_JWT_SECRET}
+    AIRFLOW__CORE__EXECUTION_API_SERVER_URL: https://airflow-apiserver:8080/execution/
+    AIRFLOW__API__SSL_CERT: /opt/airflow/certs/dlh01.crt
+    AIRFLOW__API__SSL_KEY: /opt/airflow/certs/dlh01.key
+    LDAPTLS_REQCERT: never
+    PYTHONHTTPSVERIFY: "0"
+    DBT_HOST_PROJECT_DIR: ${DBT_HOST_PROJECT_DIR}
+    DBT_LIVY_HOST: ${DBT_LIVY_HOST}
+    DBT_LIVY_USER: ${DBT_LIVY_USER}
+    DBT_LIVY_PASSWORD: ${DBT_LIVY_PASSWORD}
+  volumes:
+    - ./dags:/opt/airflow/dags
+    - ./logs:/opt/airflow/logs
+    - ./config:/opt/airflow/config
+    - ./plugins:/opt/airflow/plugins
+    - ./dbt:/opt/airflow/dbt:ro
+    - /home/support/airflow/cert:/opt/airflow/certs:ro
+  user: "${AIRFLOW_UID:-50000}:0"
+  networks: [airflow-network]
+  depends_on: &deps
+    postgres: {condition: service_healthy}
+    redis: {condition: service_healthy}
+
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    volumes: [postgres-db-volume:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "${POSTGRES_USER}"]
+      interval: 10s
+      retries: 5
+    restart: always
+    networks: [airflow-network]
+
+  redis:
+    image: redis:7.2-bookworm
+    command: ["redis-server", "--requirepass", "${REDIS_PASSWORD}"]
+    environment: {REDISCLI_AUTH: ${REDIS_PASSWORD}}
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      retries: 10
+    restart: always
+    networks: [airflow-network]
+
+  airflow-apiserver:
+    <<: *airflow-common
+    command: api-server
+    ports: ["8081:8080"]
+    restart: always
+    depends_on:
+      <<: *deps
+      airflow-init: {condition: service_completed_successfully}
+
+  airflow-scheduler:
+    <<: *airflow-common
+    command: scheduler
+    restart: always
+    depends_on:
+      <<: *deps
+      airflow-init: {condition: service_completed_successfully}
+
+  airflow-dag-processor:
+    <<: *airflow-common
+    command: dag-processor
+    restart: always
+    depends_on:
+      <<: *deps
+      airflow-init: {condition: service_completed_successfully}
+
+  airflow-worker:
+    <<: *airflow-common
+    command: celery worker
+    environment:
+      <<: *airflow-env
+      DUMB_INIT_SETSID: "0"
+    volumes:
+      - ./dags:/opt/airflow/dags
+      - ./logs:/opt/airflow/logs
+      - ./config:/opt/airflow/config
+      - ./plugins:/opt/airflow/plugins
+      - ./dbt:/opt/airflow/dbt:ro
+      - /home/support/airflow/cert:/opt/airflow/certs:ro
+      - /var/run/docker.sock:/var/run/docker.sock
+    restart: always
+    depends_on:
+      <<: *deps
+      airflow-init: {condition: service_completed_successfully}
+
+  airflow-triggerer:
+    <<: *airflow-common
+    command: triggerer
+    restart: always
+    depends_on:
+      <<: *deps
+      airflow-init: {condition: service_completed_successfully}
+
+  airflow-init:
+    <<: *airflow-common
+    user: "0:0"
+    entrypoint: /bin/bash
+    command: ["-c", "mkdir -p /opt/airflow/{logs,dags,plugins,config} && chown -R ${AIRFLOW_UID:-50000}:0 /opt/airflow/{logs,dags,plugins,config} && exec /entrypoint airflow version"]
+    environment:
+      <<: *airflow-env
+      _AIRFLOW_DB_MIGRATE: "true"
+      _AIRFLOW_WWW_USER_CREATE: "true"
+      _AIRFLOW_WWW_USER_USERNAME: ${AIRFLOW_ADMIN_USERNAME:-admin}
+      _AIRFLOW_WWW_USER_PASSWORD: ${AIRFLOW_ADMIN_PASSWORD}
+
+  dbt:
+    build: {context: ./dbt, dockerfile: Dockerfile}
+    image: bank-dbt:dev
+    working_dir: /usr/app/dbt
+    env_file: [${ENV_FILE_PATH:-.env}]
+    environment: {DBT_PROFILES_DIR: /usr/app/dbt}
+    volumes:
+      - ./dbt:/usr/app/dbt
+      - /home/support/airflow/cert:/opt/dbt/certs:ro
+    networks: [airflow-network]
+    entrypoint: ["/usr/local/bin/dbt-dev-entrypoint.sh"]
+    restart: unless-stopped
+
+volumes:
+  postgres-db-volume:
+
+networks:
+  airflow-network:
+    name: airflow-development
