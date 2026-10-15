@@ -1,11 +1,28 @@
 #!/usr/bin/env bash
-set -u
+set -euo pipefail
+
 cd /usr/app/dbt
-echo "Generating initial dbt manifest..."
-dbt parse || true
-echo "Watching dbt project for changes..."
+
+mkdir -p models macros tests snapshots target
+
+generate_manifest() {
+    echo "Generating dbt manifest..."
+
+    dbt --no-partial-parse compile \
+        --project-dir /usr/app/dbt \
+        --profiles-dir /usr/app/dbt
+
+    test -s /usr/app/dbt/target/manifest.json
+    echo "Manifest generated successfully."
+}
+
+generate_manifest
+
 while true; do
-  inotifywait -r -e modify,create,delete,move --exclude 'target|logs|dbt_packages|\.git' models macros tests snapshots dbt_project.yml 2>/dev/null || sleep 2
-  echo "dbt project changed - regenerating manifest..."
-  dbt parse || true
+    inotifywait -r \
+        -e modify,create,delete,move \
+        models macros tests snapshots
+
+    echo "dbt project changed - regenerating manifest..."
+    generate_manifest
 done
